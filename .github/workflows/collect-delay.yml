@@ -1,0 +1,46 @@
+on:
+  # cron は UTC。20-23,0-15 は日本時間の 05:00〜24:59 にあたる
+  # 車両位置の収集(collect)と5分ずらして負荷を分散する
+  schedule:
+    - cron: "5-55/10 20-23,0-15 * * *"
+  workflow_dispatch:   # 手動実行ボタン
+
+permissions:
+  contents: write
+
+concurrency:
+  group: collect-delay
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install gtfs-realtime-bindings
+
+      - name: 収集
+        env:
+          ODPT_KEY: ${{ secrets.ODPT_KEY }}
+          SAMPLES: "4"
+          INTERVAL: "120"
+        run: python collect_delay.py
+
+      - name: 保存
+        run: |
+          git config user.name "collector"
+          git config user.email "actions@users.noreply.github.com"
+          git add data_delay
+          git diff --staged --quiet && echo "変更なし" && exit 0
+          git commit -m "delay: $(date -u +%Y-%m-%dT%H:%MZ)"
+          for i in 1 2 3; do
+            git pull --rebase --autostash && git push && exit 0
+            sleep 10
+          done
+          echo "push に失敗しました" && exit 1
