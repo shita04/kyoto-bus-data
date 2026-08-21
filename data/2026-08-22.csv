@@ -1,0 +1,2 @@
+date,hour,route_id,direction_id,stop_sequence,stop_id,n_obs,n_occ,sum_occ,max_occ
+2026-08-22,6,10060,0,1,9_1,1,1,7,7
