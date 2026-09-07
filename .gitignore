@@ -1,0 +1,9 @@
+# 秘密情報（アクセストークンなど）
+.env
+
+# ダウンロードした GTFS 静的データ
+*.zip
+data/gtfs/
+
+# Python のキャッシュ
+__pycache__/
