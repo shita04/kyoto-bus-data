@@ -8,6 +8,8 @@
 
 生の車両位置は保存しない（ライセンス上の再配布リスクを避けるため）。
 保存するのは観測件数と混雑度の合計・最大値だけの統計値。
+混雑度は occupancy_status が 0〜6 の観測のみを対象とし、
+7(NO_DATA_AVAILABLE) と 8(NOT_BOARDABLE) は件数のみ n_nodata に記録する。
 
 環境変数:
     ODPT_KEY       ODPTアクセストークン（必須）
@@ -38,8 +40,24 @@ OUT_DIR = os.environ.get("OUT_DIR", "data")
 JST = datetime.timezone(datetime.timedelta(hours=9))
 HEADER = [
     "date", "hour", "route_id", "direction_id", "stop_sequence", "stop_id",
-    "n_obs", "n_occ", "sum_occ", "max_occ",
+    "n_obs", "n_occ", "sum_occ", "max_occ", "n_nodata",
 ]
+
+# GTFS-RT の occupancy_status（OccupancyStatus）の区分値。
+#   0 EMPTY                        空いている
+#   1 MANY_SEATS_AVAILABLE         座席に余裕あり
+#   2 FEW_SEATS_AVAILABLE          座席わずか
+#   3 STANDING_ROOM_ONLY           立ち席のみ
+#   4 CRUSHED_STANDING_ROOM_ONLY   立ち席も窮屈
+#   5 FULL                         満員
+#   6 NOT_ACCEPTING_PASSENGERS     乗車できない（満員のため）
+#   ここまでが「混雑度」として意味を持つ値。以下の2つは混雑度ではない。
+#   7 NO_DATA_AVAILABLE            混雑度データが無い
+#   8 NOT_BOARDABLE                そもそも乗車対象外（回送など）
+# 7 は 5(FULL) より数値が大きいため、そのまま合計すると
+# 「データが取れていない停留所ほど極端に混雑している」と誤って集計されてしまう。
+# よって 7 と 8 は混雑度に含めず、件数だけを n_nodata に記録する。
+OCC_MAX_VALID = 6
 
 
 def build_url() -> str:
@@ -76,6 +94,14 @@ def fetch_once(url: str):
         v = ent.vehicle
         when = v.timestamp or feed.header.timestamp or int(time.time())
         dt = datetime.datetime.fromtimestamp(when, JST)
+        # 混雑度は 0〜6 のみ採用。7(データなし)と 8(乗車対象外)は別枠で数える
+        occ = None
+        nodata = False
+        if v.HasField("occupancy_status"):
+            if v.occupancy_status <= OCC_MAX_VALID:
+                occ = v.occupancy_status
+            else:
+                nodata = True
         # キーは必ず文字列に統一する（CSV読み戻し時と型が食い違うと二重行になるため）
         out.append({
             "key": (
@@ -89,7 +115,8 @@ def fetch_once(url: str):
             # 同一スナップショットの二重計上を防ぐための識別子
             "uniq": (v.vehicle.id or ent.id, v.trip.trip_id or "", when,
                      v.current_stop_sequence if v.HasField("current_stop_sequence") else -1),
-            "occ": v.occupancy_status if v.HasField("occupancy_status") else None,
+            "occ": occ,
+            "nodata": nodata,
         })
     return out
 
@@ -102,8 +129,10 @@ def load_existing(path: str) -> dict:
         for row in csv.DictReader(f):
             key = (row["date"], row["hour"], row["route_id"],
                    row["direction_id"], row["stop_sequence"], row["stop_id"])
+            # n_nodata は後から追加した列。それ以前のCSVには存在しないので 0 とみなす
             agg[key] = [int(row["n_obs"]), int(row["n_occ"]),
-                        int(row["sum_occ"]), int(row["max_occ"])]
+                        int(row["sum_occ"]), int(row["max_occ"]),
+                        int(row.get("n_nodata") or 0)]
     return agg
 
 
@@ -150,12 +179,14 @@ def main() -> None:
         path = os.path.join(OUT_DIR, f"{date}.csv")
         agg = load_existing(path)
         for o in rows:
-            rec = agg.setdefault(o["key"], [0, 0, 0, 0])
+            rec = agg.setdefault(o["key"], [0, 0, 0, 0, 0])
             rec[0] += 1                       # n_obs
             if o["occ"] is not None:
                 rec[1] += 1                   # n_occ
                 rec[2] += o["occ"]            # sum_occ
                 rec[3] = max(rec[3], o["occ"])  # max_occ
+            elif o["nodata"]:
+                rec[4] += 1                   # n_nodata（7 または 8 だった件数）
         save(path, agg)
         print(f"保存: {path}（{len(agg)} 行）")
 
