@@ -1,14 +1,31 @@
 name: collect
 
+# 車両位置（混雑）と遅延（TripUpdates）を、1本のワークフローでまとめて集める。
+#
+# なぜ「1回で約2時間」集めるのか：
+#   GitHub の定期実行は混雑時に大きく間引かれる。10分おきを指定していても、
+#   2026年8月末〜9月は 4〜7時間おきにしか起動されず、収集量が約5分の1に落ちた。
+#   そこで「起動されたら長く集める」作りに変えた。
+#   30分ごとに保存するので、途中で止められてもそれまでの分は残る。
+
 on:
-  # cron は UTC。20-23,0-15 は日本時間の 05:00〜24:59 にあたる（深夜は動かさない）
+  # cron は UTC。20-23,0-14 は日本時間の 05:00〜23:59 に起動しうる時間帯
   schedule:
-    - cron: "*/10 20-23,0-15 * * *"
-  workflow_dispatch:   # 手動実行ボタン（最初のテストはこれで行う）
+    - cron: "*/30 20-23,0-14 * * *"
+  workflow_dispatch:     # 手動実行ボタン。試験用に回数を減らせる
+    inputs:
+      rounds:
+        description: "保存の回数（本番 4。試験なら 1）"
+        default: "4"
+      samples:
+        description: "1回あたりの取得回数（本番 15。試験なら 2）"
+        default: "15"
 
 permissions:
   contents: write
 
+# 実行中にもう1回起動されたら、前の回が終わるまで待たせる（重ねて動かさない）。
+# 待ちが重なると古い待ちは「Cancelled（灰色）」になるが、異常ではない。
 concurrency:
   group: collect
   cancel-in-progress: false
@@ -16,7 +33,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
 
@@ -26,22 +43,52 @@ jobs:
 
       - run: pip install gtfs-realtime-bindings
 
-      - name: 収集
+      - name: 収集と保存（30分ごとに保存）
         env:
           ODPT_KEY: ${{ secrets.ODPT_KEY }}
-          SAMPLES: "4"
+          ROUNDS: ${{ inputs.rounds || '4' }}
+          SAMPLES: ${{ inputs.samples || '15' }}
           INTERVAL: "120"
-        run: python collect.py
-
-      - name: 保存
         run: |
           git config user.name "collector"
           git config user.email "actions@users.noreply.github.com"
-          git add data
-          git diff --staged --quiet && echo "変更なし" && exit 0
-          git commit -m "data: $(date -u +%Y-%m-%dT%H:%MZ)"
-          for i in 1 2 3; do
-            git pull --rebase --autostash && git push && exit 0
-            sleep 10
+          mkdir -p data data_delay
+          worked=0   # 収集が1度でも正常に終わったか（鍵の消失などで全滅したら赤くする）
+
+          for round in $(seq 1 "$ROUNDS"); do
+            echo "=== ${round} / ${ROUNDS} 回目 ==="
+
+            # 車両位置と遅延を同時に集める。片方が失敗しても、もう片方は続ける
+            python collect.py & p1=$!
+            python collect_delay.py & p2=$!
+            if wait "$p1"; then worked=1; else echo "[warn] collect.py が失敗しました"; fi
+            if wait "$p2"; then worked=1; else echo "[warn] collect_delay.py が失敗しました"; fi
+
+            # この回の分を保存して送る
+            git add data data_delay
+            if git diff --staged --quiet; then
+              echo "変更なし"
+            else
+              git commit -m "data: $(date -u +%Y-%m-%dT%H:%MZ)"
+              for i in 1 2 3; do
+                if git pull --rebase --autostash && git push; then break; fi
+                echo "[warn] push に失敗（${i}回目）。10秒後にやり直します"
+                sleep 10
+              done
+            fi
+
+            # 次の回の最初の取得が、この回の最後と同じ内容にならないよう間をあける
+            if [ "$round" -lt "$ROUNDS" ]; then sleep "$INTERVAL"; fi
           done
-          echo "push に失敗しました" && exit 1
+
+          # 全滅していたら失敗として知らせる（緑のまま止まっているのに気づけない事故を防ぐ）
+          if [ "$worked" = 0 ]; then
+            echo "!! 車両位置・遅延のどちらの収集も正常に終わりませんでした" && exit 1
+          fi
+
+          # 最後に、送れていないコミットが残っていないか確かめる
+          git fetch -q origin
+          if [ -n "$(git log '@{u}..HEAD' --oneline)" ]; then
+            echo "!! 送れていないコミットがあります" && exit 1
+          fi
+          echo "完了"

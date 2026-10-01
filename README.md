@@ -10,7 +10,9 @@
 | `collect_delay.py` | TripUpdates（遅れ情報） | `data_delay/YYYY-MM-DD.csv` |
 | `scripts/peek_fields.py` | VehiclePosition | 出力なし（調査用。表示のみ） |
 
-いずれも GitHub Actions で 10 分おきに自動実行される（日本時間 05:00〜24:59）。
+GitHub Actions の1本のワークフロー（`collect.yml`）で、車両位置と遅延をまとめて集める（起動しうるのは日本時間 05:00〜23:59）。
+起動されると約2時間、2分おきに取得し、30分ごとに保存する。
+「起動されたら長く集める」作りにしているのは、GitHub の定期実行が混雑時に大きく間引かれるため。
 
 ## CSV の列
 
