@@ -2,17 +2,24 @@ name: collect
 
 # 車両位置（混雑）と遅延（TripUpdates）を、1本のワークフローでまとめて集める。
 #
-# なぜ「1回で約2時間」集めるのか：
-#   GitHub の定期実行は混雑時に大きく間引かれる。10分おきを指定していても、
-#   2026年8月末〜9月は 4〜7時間おきにしか起動されず、収集量が約5分の1に落ちた。
-#   そこで「起動されたら長く集める」作りに変えた。
-#   30分ごとに保存するので、途中で止められてもそれまでの分は残る。
+# 動き方（A'：自分で次の回を予約する）
+#   1. 起動されたら約2時間、2分おきに取得し、30分ごとに保存する
+#   2. 終わったら、自分で次の回を起動する（リレーのように途切れず続く）
+#   3. 夜中（0時〜5時）に起動された回は、朝5時まで待ってから次の回を起動する
+#   ※定期実行（schedule）は、リレーが切れたときに再開させる「保険」として残す
+#
+# なぜこうするのか：
+#   GitHub の定期実行は混雑時に大きく間引かれる（公式ドキュメントに記載あり）。
+#   10分おき・30分おきを指定しても、実際には4〜7時間おきにしか起動されなかった。
+#   一方、GITHUB_TOKEN から起こした workflow_dispatch は必ず新しい実行を作ると
+#   公式に書かれているため、終わりぎわに自分で次を起動すれば途切れない。
 
 on:
-  # cron は UTC。20-23,0-14 は日本時間の 05:00〜23:59 に起動しうる時間帯
+  # 保険用の定期実行。cron は UTC（20-23,0-14 は日本時間の 05:00〜23:59）。
+  # 毎時0分は混んで遅れやすいと公式にあるため、17分・47分にずらしている。
   schedule:
-    - cron: "*/30 20-23,0-14 * * *"
-  workflow_dispatch:     # 手動実行ボタン。試験用に回数を減らせる
+    - cron: "17,47 20-23,0-14 * * *"
+  workflow_dispatch:
     inputs:
       rounds:
         description: "保存の回数（本番 4。試験なら 1）"
@@ -20,12 +27,15 @@ on:
       samples:
         description: "1回あたりの取得回数（本番 15。試験なら 2）"
         default: "15"
+      chain:
+        description: "終わったら次の回を起動するか（本番 yes。試験なら no）"
+        default: "yes"
 
 permissions:
-  contents: write
+  contents: write   # 集めたデータをコミットするため
+  actions: write    # 次の回を起動するため
 
-# 実行中にもう1回起動されたら、前の回が終わるまで待たせる（重ねて動かさない）。
-# 待ちが重なると古い待ちは「Cancelled（灰色）」になるが、異常ではない。
+# 同時に動くのは1回だけ。待ちが重なったら古い待ちは「Cancelled（灰色）」になるが異常ではない
 concurrency:
   group: collect
   cancel-in-progress: false
@@ -33,17 +43,34 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 330   # 夜中に起動された回は最大5時間待つため
     steps:
       - uses: actions/checkout@v4
 
+      - name: 夜中なら朝5時まで待つ
+        id: night
+        run: |
+          echo "start=$(date +%s)" >> "$GITHUB_OUTPUT"
+          h=$((10#$(TZ=Asia/Tokyo date +%H)))
+          if [ "$h" -lt 5 ]; then
+            wait=$(( $(TZ=Asia/Tokyo date -d 'today 05:00' +%s) - $(date +%s) ))
+            echo "夜中（日本時間 ${h} 時）のため、朝5時まで ${wait} 秒待ちます"
+            sleep "$wait"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/setup-python@v5
+        if: steps.night.outputs.skip != 'true'
         with:
           python-version: "3.12"
 
       - run: pip install gtfs-realtime-bindings
+        if: steps.night.outputs.skip != 'true'
 
       - name: 収集と保存（30分ごとに保存）
+        if: steps.night.outputs.skip != 'true'
         env:
           ODPT_KEY: ${{ secrets.ODPT_KEY }}
           ROUNDS: ${{ inputs.rounds || '4' }}
@@ -81,14 +108,31 @@ jobs:
             if [ "$round" -lt "$ROUNDS" ]; then sleep "$INTERVAL"; fi
           done
 
-          # 全滅していたら失敗として知らせる（緑のまま止まっているのに気づけない事故を防ぐ）
+          # 全滅していたら失敗として知らせる（このときは次の回も起動しない）
           if [ "$worked" = 0 ]; then
             echo "!! 車両位置・遅延のどちらの収集も正常に終わりませんでした" && exit 1
           fi
 
-          # 最後に、送れていないコミットが残っていないか確かめる
+          # 送れていないコミットが残っていないか確かめる
           git fetch -q origin
           if [ -n "$(git log '@{u}..HEAD' --oneline)" ]; then
             echo "!! 送れていないコミットがあります" && exit 1
           fi
           echo "完了"
+
+      - name: 次の回を起動する
+        # 成功したときだけ。手動の試験（chain = no）では起動しない
+        if: success() && inputs.chain != 'no'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          START: ${{ steps.night.outputs.start }}
+          SKIP: ${{ steps.night.outputs.skip }}
+        run: |
+          elapsed=$(( $(date +%s) - START ))
+          # 安全装置：収集した回なのに10分未満で終わったなら、何かおかしいので連鎖を止める
+          # （短い間隔で起動を繰り返す事故を防ぐ）
+          if [ "$SKIP" != "true" ] && [ "$elapsed" -lt 600 ]; then
+            echo "!! 実行が短すぎる（${elapsed} 秒）ため、次の回は起動しません" && exit 1
+          fi
+          gh workflow run collect.yml --ref "${GITHUB_REF_NAME}"
+          echo "次の回を起動しました"
