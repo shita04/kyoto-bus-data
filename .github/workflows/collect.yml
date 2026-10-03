@@ -45,7 +45,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 330   # 夜中に起動された回は最大5時間待つため
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: 夜中なら朝5時まで待つ
         id: night
@@ -61,7 +61,7 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         if: steps.night.outputs.skip != 'true'
         with:
           python-version: "3.12"
