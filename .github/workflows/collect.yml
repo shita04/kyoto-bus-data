@@ -42,7 +42,8 @@ concurrency:
 
 jobs:
   run:
-    runs-on: ubuntu-latest
+    # 2026-10-04 Ubuntu 26 への自動切替を避けるため固定。24.04 の提供終了予告が出たら見直す
+    runs-on: ubuntu-24.04
     timeout-minutes: 330   # 夜中に起動された回は最大5時間待つため
     steps:
       - uses: actions/checkout@v7
