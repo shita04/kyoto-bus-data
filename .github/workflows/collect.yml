@@ -87,7 +87,8 @@ jobs:
             echo "=== ${round} / ${ROUNDS} 回目 ==="
 
             # 車両位置と遅延を同時に集める。片方が失敗しても、もう片方は続ける
-            python collect.py & p1=$!
+            # 直前のデータ保存の時刻（collect.py が「前の起動と同じ便」を数えないために使う）
+            PREV_SAVE_AT=$(git log -1 --format=%ct -- data 2>/dev/null) python collect.py & p1=$!
             python collect_delay.py & p2=$!
             if wait "$p1"; then worked=1; else echo "[warn] collect.py が失敗しました"; fi
             if wait "$p2"; then worked=1; else echo "[warn] collect_delay.py が失敗しました"; fi
