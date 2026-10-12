@@ -30,6 +30,18 @@ FEED_URL = os.environ.get(
     "https://api.odpt.org/api/v4/gtfs/realtime/odpt_KyotoBus_AllLines_trip_update",
 )
 ODPT_KEY = os.environ.get("ODPT_KEY", "")
+
+
+def mask(text: str) -> str:
+    """文字列に混ざったトークンを *** に伏せる。
+    本体も伏せるのは、Request に渡した URL の前後の空白・改行が取り除かれ（urllib の unwrap）、例外のメッセージには本体だけが入りうるため。
+    """
+    core = ODPT_KEY.strip()
+    if not core:
+        return text
+    return text.replace(ODPT_KEY, "***").replace(core, "***")
+
+
 SAMPLES = int(os.environ.get("SAMPLES", "4"))
 INTERVAL = int(os.environ.get("INTERVAL", "120"))
 OUT_DIR = os.environ.get("OUT_DIR", "data_delay")
@@ -58,14 +70,14 @@ def fetch_once(url: str):
         with urllib.request.urlopen(req, timeout=30) as res:
             raw = res.read()
     except Exception as e:
-        print(f"[warn] 取得失敗: {e}", file=sys.stderr)
+        print(f"[warn] 取得失敗: {mask(str(e))}", file=sys.stderr)
         return []
 
     feed = gtfs_realtime_pb2.FeedMessage()
     try:
         feed.ParseFromString(raw)
     except Exception as e:
-        print(f"[warn] 解析失敗: {e}", file=sys.stderr)
+        print(f"[warn] 解析失敗: {mask(str(e))}", file=sys.stderr)
         return []
 
     now = feed.header.timestamp or int(time.time())
