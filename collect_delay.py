@@ -64,8 +64,15 @@ def build_url() -> str:
 
 
 def fetch_once(url: str):
-    """1回取得して観測リストを返す。失敗しても実行全体は止めない。"""
-    req = urllib.request.Request(url, headers={"User-Agent": "kyoto-bus-forecast/1.0"})
+    """1回取得して観測リストを返す。通信と解析の失敗では実行全体を止めない（住所の設定の誤りは止める）。"""
+    # 住所の設定の誤り（https:// が無いなど）は、静かに続けずに止める。
+    # 元のエラーの文には住所がまるごと（トークン入りで）入るので、その文は出さない。
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "kyoto-bus-forecast/1.0"})
+    except Exception as e:
+        print(f"!! 住所の設定（ODPT_TU_URL）の形が正しくありません（{type(e).__name__}）。"
+              "https:// から始まるか確かめてください", file=sys.stderr)
+        sys.exit(1)
     try:
         with urllib.request.urlopen(req, timeout=30) as res:
             raw = res.read()
